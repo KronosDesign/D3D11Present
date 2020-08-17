@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <Windows.h>
 #include <inttypes.h>
+#include <tchar.h>
 #include <string>
 
 #include <d3d11.h>
@@ -12,150 +13,199 @@
 #include "Detours/detours.h"
 #pragma comment(lib, "Detours/detours.lib")
 
+#include "ImGui/imgui.h"
+#include "ImGui/imgui_internal.h"
+#include "ImGui/imgui_impl_dx11.h"
+#include "ImGui/imgui_impl_win32.h"
+
 #include "renderer.h"
+#include "logger.h"
 
-#define LOG_STREAM stdout
-
-#define FONT_SIZE 38.0f
+#define FONT_SIZE 16.0f
 #define FONT_TYPE L"Verdana"
 
-std::unique_ptr<Renderer> renderer;
+std::unique_ptr<Renderer> customRenderer;
 
 typedef HRESULT(__stdcall *D3D11PresentHook) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 D3D11PresentHook phookD3D11Present = NULL;
 
+DWORD_PTR* pSwapChainVtable = NULL;
 ID3D11Device *pDevice = NULL;
 ID3D11DeviceContext *pContext = NULL;
-DWORD_PTR* pSwapChainVtable = NULL;
-
-ID3D11Texture2D* pRenderTargetTexture = NULL;
 ID3D11RenderTargetView* pRenderTargetView = NULL;
 
-UINT numViewports = 1;
+WNDPROC hGameWindowProc;
+
 D3D11_VIEWPORT viewport;
 float screenCenterX;
 float screenCenterY;
 
-enum MsgType
+void DrawImGui()
 {
-	INFO_MSG = 0,
-	WARNING_MSG = 1,
-	ERROR_MSG = 2
-};
+	ImGui::Begin("ImGui D3D11", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize);
+	ImGui::Spacing();
 
-void Log(std::string msg, MsgType type = INFO_MSG)
-{
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+	ImGui::Text("Client size: %.0f x %.0f", viewport.Width, viewport.Height);
 
-	fprintf(LOG_STREAM, "[");
-	SetConsoleTextAttribute(hConsole, 11);
-	fprintf(LOG_STREAM, "D3D11");
-	SetConsoleTextAttribute(hConsole, 7);
-	fprintf(LOG_STREAM, "][");
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
 
-	switch (type)
+	static bool bShowDemo = false;
+	ImGui::Checkbox("Show Demo Window", &bShowDemo);
+
+	ImGui::Spacing();
+	ImGui::End();
+
+	if (bShowDemo)
 	{
-	case INFO_MSG:
-		SetConsoleTextAttribute(hConsole, 10);
-		fprintf(LOG_STREAM, "INFO");
-		break;
-	case WARNING_MSG:
-		SetConsoleTextAttribute(hConsole, 14);
-		fprintf(LOG_STREAM, "WARNING");
-		break;
-	case ERROR_MSG:
-		SetConsoleTextAttribute(hConsole, 12);
-		fprintf(LOG_STREAM, "ERROR");
-		break;
+		ImGui::ShowDemoWindow(&bShowDemo);
 	}
-
-	SetConsoleTextAttribute(hConsole, 7);
-	fprintf(LOG_STREAM, "] %s\n", msg.c_str());
 }
 
-template <typename ...Args>
-std::string FormatString(const std::string& format, Args && ...args)
+void DrawCustomRenderer()
 {
-	auto size = std::snprintf(nullptr, 0, format.c_str(), std::forward<Args>(args)...);
-	std::string output(size + 1, '\0');
-	std::sprintf(&output[0], format.c_str(), std::forward<Args>(args)...);
-	return output;
-}
-
-bool firstTime = true;
-HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
-{
-	if (firstTime)
-	{
-		if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void **)&pDevice)))
-		{
-			pSwapChain->GetDevice(__uuidof(pDevice), (void**)&pDevice);
-			pDevice->GetImmediateContext(&pContext);
-			Log("D3D11Device Initialized");
-		}
-		else
-		{
-			Log("Failed to initialize D3D11Device", ERROR_MSG);
-		}
-
-		if (SUCCEEDED(pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pRenderTargetTexture)))
-		{
-			pDevice->CreateRenderTargetView(pRenderTargetTexture, NULL, &pRenderTargetView);
-			pRenderTargetTexture->Release();
-			Log("D3D11RenderTargetView Initialized");
-		}
-		else
-		{
-			Log("Failed to initialize D3D11RenderTargetView", ERROR_MSG);
-		}
-
-		pContext->RSGetViewports(&numViewports, &viewport);
-		screenCenterX = viewport.Width / 2.0f;
-		screenCenterY = viewport.Height / 2.0f;
-
-		Log(FormatString("D3D11Viewport resolution: %.0f x %.0f", viewport.Width, viewport.Height));
-
-		renderer = std::make_unique<Renderer>(pDevice);
-
-		firstTime = false;
-	}
-
-	pContext->OMSetRenderTargets(1, &pRenderTargetView, NULL);
-
-	renderer->begin();
-
-	std::wstring str = L"D3D11Present Drawing!";
-	auto size = renderer->getTextExtent(str, FONT_SIZE, FONT_TYPE);
-	renderer->drawText(Vec2(
-		screenCenterX - size.x * .5f, 
-		screenCenterY - size.y * .5f), 
-		str, 
-		Color{ 0.f, 1.f, 1.f, 1.f }, 
-		0, 
-		FONT_SIZE, 
+	std::wstring str = L"D3D11 Custom Renderer";
+	auto size = customRenderer->getTextExtent(str, FONT_SIZE, FONT_TYPE);
+	customRenderer->drawText(Vec2(
+		screenCenterX - size.x * .5f,
+		screenCenterY - size.y * .5f),
+		str,
+		Color{ 0.f, 1.f, 1.f, 1.f },
+		0,
+		FONT_SIZE,
 		FONT_TYPE);
-	renderer->drawFilledRect(Vec4(
+	customRenderer->drawFilledRect(Vec4(
 		screenCenterX - 20.f - size.x * .5f,
 		screenCenterY - 20.f - size.y * .5f,
 		40.f + size.x,
 		40.f + size.y),
 		Color{ 0.f, 0.f, 0.f, .75f });
+}
 
-	renderer->draw();
-	renderer->end();
+HWND FindWindow(DWORD pid, TCHAR* className)
+{
+	HWND hCurWnd = GetTopWindow(0);
+	while (hCurWnd != NULL)
+	{
+		DWORD cur_pid;
+		DWORD dwTheardId = GetWindowThreadProcessId(hCurWnd, &cur_pid);
+
+		if (cur_pid == pid)
+		{
+			if (IsWindowVisible(hCurWnd) != 0)
+			{
+				TCHAR szClassName[256];
+				GetClassName(hCurWnd, szClassName, 256);
+				if (_tcscmp(szClassName, className) == 0)
+				{
+					return hCurWnd;
+				}
+			}
+		}
+		hCurWnd = GetNextWindow(hCurWnd, GW_HWNDNEXT);
+	}
+	return NULL;
+}
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK hookWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	CallWindowProc(ImGui_ImplWin32_WndProcHandler, hWnd, uMsg, wParam, lParam);
+
+	ImGuiIO& io = ImGui::GetIO();
+	if (io.WantCaptureMouse || io.WantCaptureKeyboard) {
+		return true;
+	}
+
+	return CallWindowProc(hGameWindowProc, hWnd, uMsg, wParam, lParam);
+}
+
+bool initRendering = true;
+HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
+{
+	if (initRendering)
+	{
+		if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void **)&pDevice)) &&
+			SUCCEEDED(pSwapChain->GetDevice(__uuidof(pDevice), (void**)&pDevice)))
+		{
+			pDevice->GetImmediateContext(&pContext);
+			Log::Info("D3D11Device Initialized");
+		}
+		else
+		{
+			Log::Error("Failed to initialize D3D11Device");
+		}
+
+		ID3D11Texture2D* pRenderTargetTexture = NULL;
+		if (SUCCEEDED(pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pRenderTargetTexture)) &&
+			SUCCEEDED(pDevice->CreateRenderTargetView(pRenderTargetTexture, NULL, &pRenderTargetView)))
+		{
+			pRenderTargetTexture->Release();
+			Log::Info("D3D11RenderTargetView Initialized");
+		}
+		else
+		{
+			Log::Error("Failed to initialize D3D11RenderTargetView");
+		}
+
+		UINT numViewports = 1;
+		pContext->RSGetViewports(&numViewports, &viewport);
+		screenCenterX = viewport.Width / 2.0f;
+		screenCenterY = viewport.Height / 2.0f;
+
+		Log::Info("Viewport resolution: %.0f x %.0f", viewport.Width, viewport.Height);
+
+		ImGui::CreateContext();
+
+		HWND hGameWindow = FindWindow(GetCurrentProcessId(), "UnrealWindow");
+		hGameWindowProc = (WNDPROC)SetWindowLongPtr(hGameWindow, GWLP_WNDPROC, (LONG_PTR)hookWndProc);
+		ImGui_ImplWin32_Init(hGameWindow);
+
+		ImGui_ImplDX11_CreateDeviceObjects();
+		ImGui_ImplDX11_Init(pDevice, pContext);
+
+		customRenderer = std::make_unique<Renderer>(pDevice);
+
+		initRendering = false;
+	}
+
+	// must call before drawing
+	pContext->OMSetRenderTargets(1, &pRenderTargetView, NULL);
+
+	// ImGui Rendering ---------------------------------------------
+
+	ImGui_ImplDX11_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+
+	DrawImGui();
+
+	ImGui::Render();
+	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+	// Custom Renderer ---------------------------------------------
+
+	customRenderer->begin();
+
+	DrawCustomRenderer();
+
+	customRenderer->draw();
+	customRenderer->end();
 
 	return phookD3D11Present(pSwapChain, SyncInterval, Flags);
 }
 
 
-LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT WINAPI tmpWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 DWORD __stdcall InitHook(LPVOID)
 {
-	Log("Setting up D3D11Present hook");
+	Log::Info("Setting up D3D11Present hook");
 
 	HMODULE hDXGIDLL = 0;
 	do
@@ -167,7 +217,7 @@ DWORD __stdcall InitHook(LPVOID)
 
 	IDXGISwapChain* pSwapChain;
 
-	WNDCLASSEXA wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandleA(NULL), NULL, NULL, NULL, NULL, "DX", NULL };
+	WNDCLASSEXA wc = { sizeof(WNDCLASSEX), CS_CLASSDC, tmpWndProc, 0L, 0L, GetModuleHandleA(NULL), NULL, NULL, NULL, NULL, "DX", NULL };
 	RegisterClassExA(&wc);
 
 	HWND hWnd = CreateWindowA("DX", NULL, WS_OVERLAPPEDWINDOW, 100, 100, 300, 300, NULL, NULL, wc.hInstance, NULL);
@@ -217,18 +267,19 @@ DWORD __stdcall InitHook(LPVOID)
 		&obtainedLevel,
 		&pContext)))
 	{
-		Log("Failed to create D3D device and swapchain", ERROR_MSG);
+		Log::Error("Failed to create D3D device and swapchain");
 		return NULL;
 	}
 
 	pSwapChainVtable = (DWORD_PTR*)pSwapChain;
 	pSwapChainVtable = (DWORD_PTR*)pSwapChainVtable[0];
 
-	Log(FormatString("SwapChain:              0x%" PRIXPTR, pSwapChain));
-	Log(FormatString("SwapChainVtable:        0x%" PRIXPTR, pSwapChainVtable));
-	Log(FormatString("Device:                 0x%" PRIXPTR, pDevice));
-	Log(FormatString("DeviceContext:          0x%" PRIXPTR, pContext));
-	Log(FormatString("D3D11Present:           0x%" PRIXPTR, pSwapChainVtable[8]));
+	Log::Info("BaseAddr:               0x%" PRIXPTR, (DWORD_PTR)GetModuleHandle(NULL));
+	Log::Info("SwapChain:              0x%" PRIXPTR, pSwapChain);
+	Log::Info("SwapChainVtable:        0x%" PRIXPTR, pSwapChainVtable);
+	Log::Info("Device:                 0x%" PRIXPTR, pDevice);
+	Log::Info("DeviceContext:          0x%" PRIXPTR, pContext);
+	Log::Info("D3D11Present:           0x%" PRIXPTR, pSwapChainVtable[8]);
 
 	phookD3D11Present = (D3D11PresentHook)pSwapChainVtable[8];
 	DetourTransactionBegin();
@@ -264,7 +315,7 @@ BOOL __stdcall DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
 		SetConsoleTitleA("D3D11 - DEBUG");
 		freopen("CON", "w", stdout);
 
-		Log("Injected Successfully");
+		Log::Info("Injected Successfully");
 
 		CreateThread(NULL, 0, InitHook, NULL, 0, NULL);
 		break;
